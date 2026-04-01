@@ -10,6 +10,7 @@ from detectron2.layers import Conv2d
 
 from .position_encoding import PositionEmbeddingSine
 from mask2former.modeling.transformer_decoder.maskformer_transformer_decoder import TRANSFORMER_DECODER_REGISTRY
+from .moe_layer import MoEFFNLayer
 
 
 class SelfAttentionLayer(nn.Module):
@@ -246,6 +247,9 @@ class VitaMultiScaleMaskedTransformerDecoder(nn.Module):
         mask_dim: int,
         enforce_input_project: bool,
         vita_last_layer_num: int,
+        use_moe: bool = False,
+        num_experts: int = 1,
+        current_task: int = 0,
     ):
         """
         NOTE: this interface is experimental.
@@ -280,7 +284,11 @@ class VitaMultiScaleMaskedTransformerDecoder(nn.Module):
         self.transformer_cross_attention_layers = nn.ModuleList()
         self.transformer_ffn_layers = nn.ModuleList()
 
-        for _ in range(self.num_layers):
+        self.use_moe = use_moe
+        self.num_experts = num_experts
+        self.current_task = current_task
+
+        for i in range(self.num_layers):
             self.transformer_self_attention_layers.append(
                 SelfAttentionLayer(
                     d_model=hidden_dim,
@@ -299,14 +307,28 @@ class VitaMultiScaleMaskedTransformerDecoder(nn.Module):
                 )
             )
 
-            self.transformer_ffn_layers.append(
-                FFNLayer(
-                    d_model=hidden_dim,
-                    dim_feedforward=dim_feedforward,
-                    dropout=0.0,
-                    normalize_before=pre_norm,
+            # Use MoE FFN for the last layer if use_moe is True
+            if i == self.num_layers - 1 and use_moe:
+                self.transformer_ffn_layers.append(
+                    MoEFFNLayer(
+                        d_model=hidden_dim,
+                        dim_feedforward=dim_feedforward,
+                        num_experts=num_experts,
+                        current_task=current_task,
+                        dropout=0.0,
+                        activation="relu",
+                        normalize_before=pre_norm,
+                    )
                 )
-            )
+            else:
+                self.transformer_ffn_layers.append(
+                    FFNLayer(
+                        d_model=hidden_dim,
+                        dim_feedforward=dim_feedforward,
+                        dropout=0.0,
+                        normalize_before=pre_norm,
+                    )
+                )
 
         self.decoder_norm = nn.LayerNorm(hidden_dim)
 
@@ -339,7 +361,7 @@ class VitaMultiScaleMaskedTransformerDecoder(nn.Module):
         ret = {}
         ret["in_channels"] = in_channels
         ret["mask_classification"] = mask_classification
-        
+
         ret["num_classes"] = cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES
         ret["hidden_dim"] = cfg.MODEL.MASK_FORMER.HIDDEN_DIM
         ret["num_queries"] = cfg.MODEL.MASK_FORMER.NUM_OBJECT_QUERIES
@@ -360,7 +382,31 @@ class VitaMultiScaleMaskedTransformerDecoder(nn.Module):
         ret["mask_dim"] = cfg.MODEL.SEM_SEG_HEAD.MASK_DIM
         ret["vita_last_layer_num"] = cfg.MODEL.VITA.LAST_LAYER_NUM
 
+        # MoE parameters
+        ret["use_moe"] = cfg.MODEL.MASK_FORMER.get("USE_MOE", False)
+        ret["num_experts"] = cfg.CONT.TASK + 1 if ret["use_moe"] else 1
+        ret["current_task"] = cfg.CONT.TASK
+
         return ret
+
+    def add_new_expert_for_task(self, new_task_id):
+        """Add new expert for incremental learning and freeze old parameters"""
+        if not self.use_moe:
+            return
+
+        last_ffn = self.transformer_ffn_layers[-1]
+        if isinstance(last_ffn, MoEFFNLayer):
+            # Add new expert
+            last_ffn.add_new_expert(
+                d_model=last_ffn.d_model,
+                dim_feedforward=last_ffn.dim_feedforward,
+                dropout=0.0,
+                activation="relu"
+            )
+            # Freeze old experts and router
+            last_ffn.freeze_old_experts(new_task_id)
+            self.current_task = new_task_id
+            self.num_experts = last_ffn.num_experts
 
     def forward(self, x, mask_features, clip_mask_features, mask = None):
         # x is a list of multi-scale feature

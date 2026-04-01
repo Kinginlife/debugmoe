@@ -112,3 +112,6 @@ def add_maskformer2_config(cfg):
     # Importance sampling parameter for PointRend point sampling during training. Parametr `beta` in
     # the original paper.
     cfg.MODEL.MASK_FORMER.IMPORTANCE_SAMPLE_RATIO = 0.75
+
+    # MoE config for incremental learning
+    cfg.MODEL.MASK_FORMER.USE_MOE = False
