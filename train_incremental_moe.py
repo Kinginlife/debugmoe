@@ -71,56 +71,72 @@ class IncrementalMoETrainer(Trainer):
             f.write(f"Freezing shared components for Task {current_task}\n")
             f.write(f"{'='*60}\n\n")
 
-            # 1. Freeze Backbone
-            if hasattr(model, 'backbone'):
-                for name, param in model.backbone.named_parameters():
-                    param.requires_grad = False
-                f.write("✓ Backbone frozen\n")
+            # Step 1: Freeze ALL parameters
+            for name, param in model.named_parameters():
+                param.requires_grad = False
+            f.write("✓ All parameters frozen\n\n")
 
-            # 2. Freeze Pixel Decoder
-            if hasattr(model, 'sem_seg_head') and hasattr(model.sem_seg_head, 'pixel_decoder'):
-                for name, param in model.sem_seg_head.pixel_decoder.named_parameters():
-                    param.requires_grad = False
-                f.write("✓ Pixel Decoder frozen\n")
+            # Step 2: Unfreeze ONLY trainable components
+            f.write("Unfreezing trainable components:\n")
 
-            # 3. Freeze Frame Decoder shared layers (all except last MoE layer)
+            # Unfreeze Query Embeddings
             if hasattr(model, 'sem_seg_head') and hasattr(model.sem_seg_head, 'predictor'):
                 predictor = model.sem_seg_head.predictor
+                # if hasattr(predictor, 'query_feat'):
+                #     predictor.query_feat.weight.requires_grad = True
+                #     f.write("  ✓ query_feat unfrozen\n")
+                # if hasattr(predictor, 'query_embed'):
+                #     predictor.query_embed.weight.requires_grad = True
+                #     f.write("  ✓ query_embed unfrozen\n")
 
-                # Freeze self-attention layers
-                if hasattr(predictor, 'transformer_self_attention_layers'):
-                    for layer in predictor.transformer_self_attention_layers:
-                        for param in layer.parameters():
-                            param.requires_grad = False
+                # Unfreeze Prediction Heads
+                if hasattr(predictor, 'class_embed'):
+                    for param in predictor.class_embed.parameters():
+                        param.requires_grad = True
+                    f.write("  ✓ class_embed unfrozen\n")
+                # if hasattr(predictor, 'mask_embed'):
+                #     for param in predictor.mask_embed.parameters():
+                #         param.requires_grad = True
+                #     f.write("  ✓ mask_embed unfrozen\n")
 
-                # Freeze cross-attention layers
-                if hasattr(predictor, 'transformer_cross_attention_layers'):
-                    for layer in predictor.transformer_cross_attention_layers:
-                        for param in layer.parameters():
-                            param.requires_grad = False
-
-                # Freeze FFN layers except the last one (MoE layer)
+                # Unfreeze ONLY the new Expert in MoE layer
                 if hasattr(predictor, 'transformer_ffn_layers'):
-                    for i, layer in enumerate(predictor.transformer_ffn_layers):
-                        if i < len(predictor.transformer_ffn_layers) - 1:
-                            # Freeze non-MoE FFN layers
-                            for param in layer.parameters():
-                                param.requires_grad = False
+                    last_ffn = predictor.transformer_ffn_layers[-1]
+                    # Check if it's MoE layer
+                    if hasattr(last_ffn, 'experts') and hasattr(last_ffn, 'num_experts'):
+                        # Only unfreeze the last expert (new expert for current task)
+                        new_expert_idx = current_task
+                        if new_expert_idx < len(last_ffn.experts):
+                            for param in last_ffn.experts[new_expert_idx].parameters():
+                                param.requires_grad = True
+                            f.write(f"  ✓ Expert {new_expert_idx} (new expert) unfrozen\n")
 
-                # Freeze other components (except query embeddings and prediction heads)
-                if hasattr(predictor, 'level_embed'):
-                    predictor.level_embed.weight.requires_grad = False
-                if hasattr(predictor, 'input_proj'):
-                    for proj in predictor.input_proj:
-                        for param in proj.parameters():
-                            param.requires_grad = False
-                if hasattr(predictor, 'decoder_norm'):
-                    for param in predictor.decoder_norm.parameters():
-                        param.requires_grad = False
+                            # Verify old experts are frozen
+                            for i in range(new_expert_idx):
+                                for param in last_ffn.experts[i].parameters():
+                                    if param.requires_grad:
+                                        f.write(f"  ⚠ WARNING: Expert {i} is NOT frozen!\n")
 
-                f.write("✓ Frame Decoder shared layers frozen\n")
-                f.write("✓ Query Embeddings kept trainable\n")
-                f.write("✓ Prediction Heads kept trainable\n")
+                            # Verify router is frozen
+                            router_frozen = True
+                            for param in last_ffn.router.parameters():
+                                if param.requires_grad:
+                                    router_frozen = False
+                                    f.write(f"  ⚠ WARNING: Router is NOT frozen!\n")
+                            if router_frozen:
+                                f.write(f"  ✓ Router is frozen (as expected)\n")
+
+            # Unfreeze VITA module prediction heads
+            if hasattr(model, 'vita_module'):
+                vita = model.vita_module
+                if hasattr(vita, 'class_embed'):
+                    for param in vita.class_embed.parameters():
+                        param.requires_grad = True
+                    f.write("  ✓ vita_module.class_embed unfrozen\n")
+                # if hasattr(vita, 'mask_embed'):
+                #     for param in vita.mask_embed.parameters():
+                #         param.requires_grad = True
+                #     f.write("  ✓ vita_module.mask_embed unfrozen\n")
 
             # Print trainable parameters summary
             total_params = sum(p.numel() for p in model.parameters())
@@ -129,10 +145,17 @@ class IncrementalMoETrainer(Trainer):
             f.write(f"Total parameters: {total_params:,}\n")
             f.write(f"Trainable parameters: {trainable_params:,} ({100*trainable_params/total_params:.2f}%)\n")
             f.write(f"Frozen parameters: {total_params-trainable_params:,} ({100*(total_params-trainable_params)/total_params:.2f}%)\n")
-            f.write(f"{'='*60}\n")
+            f.write(f"{'='*60}\n\n")
+
+            # List all trainable parameters
+            f.write("Trainable parameter names:\n")
+            for name, param in model.named_parameters():
+                if param.requires_grad:
+                    f.write(f"  - {name}: {param.numel():,} params\n")
 
         # Also print to console
-        print(f"Parameter info saved to: {param_file}")
+        # print(f"Parameter info saved to: {param_file}")
+        # print(f"Trainable: {trainable_params:,} / {total_params:,} ({100*trainable_params/total_params:.2f}%)")
 
 
 def setup(args):
