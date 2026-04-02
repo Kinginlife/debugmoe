@@ -203,7 +203,7 @@ def main(args):
         return res
 
     trainer = IncrementalMoETrainer(cfg)
-    trainer.resume_or_load(resume=args.resume)
+    #trainer.resume_or_load(resume=args.resume)
     return trainer.train()
 
 

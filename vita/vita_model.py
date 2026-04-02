@@ -129,7 +129,7 @@ class Vita(nn.Module):
             num_points=cfg.MODEL.MASK_FORMER.TRAIN_NUM_POINTS,
         )
 
-        weight_dict = {"loss_ce": class_weight, "loss_mask": mask_weight, "loss_dice": dice_weight}
+        weight_dict = {"loss_ce": class_weight, "loss_mask":0.0, "loss_dice": 0.0}
 
         if deep_supervision:
             dec_layers = cfg.MODEL.MASK_FORMER.DEC_LAYERS
@@ -165,7 +165,7 @@ class Vita(nn.Module):
             num_points=cfg.MODEL.MASK_FORMER.TRAIN_NUM_POINTS,
         )
         vita_weight_dict = {
-            "loss_vita_ce": class_weight, "loss_vita_mask": mask_weight, "loss_vita_dice": dice_weight
+            "loss_vita_ce": class_weight, "loss_vita_mask": 0.0, "loss_vita_dice": 0.0
         }
         if sim_weight > 0.0:
             vita_weight_dict["loss_vita_sim"] = sim_weight
@@ -275,7 +275,6 @@ class Vita(nn.Module):
         # mask classification target
         frame_targets, clip_targets = self.prepare_targets(batched_inputs, images)
 
-        # bipartite matching-based loss
         losses, fg_indices = self.criterion(outputs, frame_targets)
 
         vita_outputs = self.vita_module(frame_queries)
@@ -296,6 +295,20 @@ class Vita(nn.Module):
             if k in vita_weight_dict:
                 vita_loss_dict[k] *= vita_weight_dict[k]
         losses.update(vita_loss_dict)
+
+        import os
+        from detectron2.utils.comm import is_main_process
+
+        param_file = os.path.join("/data1/lsh/VITA_continue/output", 'print.txt')
+
+        with open(param_file, 'a') as f:
+            # 检查分类头有没有变成随机数 
+            if hasattr(self, 'sem_seg_head')and is_main_process():
+                hw = self.sem_seg_head.predictor.class_embed.weight
+                vw = self.vita_module.class_embed.weight
+                # 记录权重的绝对值和，只要这个数字变了，说明权重被污染了
+                f.write(f"\n[DEBUG Weight Sum] Mask head: {hw.abs().sum().item():.4f} | VITA head: {vw.abs().sum().item():.4f}")
+        # ----------------------------------------
         return losses
 
     def prepare_targets(self, targets, images):
@@ -402,6 +415,7 @@ class Vita(nn.Module):
 
         topk_indices = torch.div(topk_indices, self.sem_seg_head.num_classes, rounding_mode='floor')
         mask_embed = mask_embed[topk_indices]
+
 
         masks_per_video = []
         numerator = torch.zeros(len(mask_embed), dtype=torch.float, device=self.device)
