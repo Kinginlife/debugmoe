@@ -384,7 +384,11 @@ class VitaMultiScaleMaskedTransformerDecoder(nn.Module):
 
         # MoE parameters
         ret["use_moe"] = cfg.MODEL.MASK_FORMER.get("USE_MOE", False)
-        ret["num_experts"] = cfg.CONT.TASK + 1 if ret["use_moe"] else 1
+        # IMPORTANT for incremental loading:
+        # - task0 builds with 1 expert
+        # - taskN (N>0) first builds with N experts (same as previous task), then adds 1 new expert after loading checkpoint
+        # This avoids duplicate expert creation.
+        ret["num_experts"] = cfg.CONT.TASK if (ret["use_moe"] and cfg.CONT.TASK > 0) else 1
         ret["current_task"] = cfg.CONT.TASK
 
         return ret

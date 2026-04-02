@@ -69,6 +69,12 @@ class MoEFFNLayer(nn.Module):
         router_logits = self.router(tgt)  # [seq_len, batch, num_experts]
         router_weights = F.softmax(router_logits, dim=-1)
 
+        # ====== DEBUG 专用代码：强制所有权重分配给 Expert 0 ======
+        # 把所有权重清零
+        router_weights = torch.zeros_like(router_weights)
+        # 强制 Expert 0 (Task 0的旧专家) 权重为 1.0
+        router_weights[..., 0] = 1.0
+
         # Weighted combination of all experts
         expert_outputs = []
         for i, expert in enumerate(self.experts):
@@ -92,7 +98,13 @@ class MoEFFNLayer(nn.Module):
 
         router_logits = self.router(tgt2)
         router_weights = F.softmax(router_logits, dim=-1)
-
+        
+        # ====== DEBUG 专用代码：强制所有权重分配给 Expert 0 ======
+        # 把所有权重清零
+        router_weights = torch.zeros_like(router_weights)
+        # 强制 Expert 0 (Task 0的旧专家) 权重为 1.0
+        router_weights[..., 0] = 1.0
+        
         expert_outputs = []
         for i, expert in enumerate(self.experts):
             x = expert[0](tgt2)

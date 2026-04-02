@@ -1,0 +1,7 @@
+_BASE_: vita_R50_bs8.yaml
+MODEL:
+  META_ARCHITECTURE: "VitaDebugGTMask"  # Use debug model with GT masks
+  MASK_FORMER:
+    USE_MOE: True  # Enable MoE for Frame Decoder
+CONT:
+  TASK: 0  # Current task ID (0 for base task)

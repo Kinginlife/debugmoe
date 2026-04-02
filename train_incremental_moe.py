@@ -31,26 +31,40 @@ class IncrementalMoETrainer(Trainer):
     def build_model(cls, cfg):
         model = super().build_model(cfg)
 
-        # For Task 1+: Load previous task model and add new expert
+        # For Task 1+: Load previous task model and add exactly one new expert
         if cfg.CONT.TASK > 0 and cfg.CONT.WEIGHTS:
             print(f"Loading Task {cfg.CONT.TASK - 1} model from {cfg.CONT.WEIGHTS}")
             checkpointer = DetectionCheckpointer(model)
             checkpointer.load(cfg.CONT.WEIGHTS)
 
-            # Freeze all shared components
-            cls._freeze_shared_components(model, cfg.CONT.TASK)
-
-            # Add new expert to Frame Decoder
+            # Add new expert to Frame Decoder (only once per incremental task)
             if hasattr(model, 'sem_seg_head') and hasattr(model.sem_seg_head, 'predictor'):
                 predictor = model.sem_seg_head.predictor
                 if hasattr(predictor, 'add_new_expert_for_task'):
+                    before_cnt = -1
+                    after_cnt = -1
+                    if hasattr(predictor, 'transformer_ffn_layers'):
+                        last_ffn = predictor.transformer_ffn_layers[-1]
+                        if hasattr(last_ffn, 'experts'):
+                            before_cnt = len(last_ffn.experts)
+
                     print(f"Adding new expert for Task {cfg.CONT.TASK}")
                     predictor.add_new_expert_for_task(cfg.CONT.TASK)
+
+                    if hasattr(predictor, 'transformer_ffn_layers'):
+                        last_ffn = predictor.transformer_ffn_layers[-1]
+                        if hasattr(last_ffn, 'experts'):
+                            after_cnt = len(last_ffn.experts)
+
+                    print(f"Expert count: before={before_cnt}, after={after_cnt}, expected={cfg.CONT.TASK + 1}")
 
                     # Move new expert to the same device as the model
                     device = next(model.parameters()).device
                     model = model.to(device)
                     print(f"Model moved to device: {device}")
+
+            # Freeze all shared components AFTER adding new expert, so only the new one is trainable
+            cls._freeze_shared_components(model, cfg.CONT.TASK)
 
         return model
 
@@ -90,10 +104,10 @@ class IncrementalMoETrainer(Trainer):
                 #     f.write("  ✓ query_embed unfrozen\n")
 
                 # Unfreeze Prediction Heads
-                if hasattr(predictor, 'class_embed'):
-                    for param in predictor.class_embed.parameters():
-                        param.requires_grad = True
-                    f.write("  ✓ class_embed unfrozen\n")
+                # if hasattr(predictor, 'class_embed'):
+                #     for param in predictor.class_embed.parameters():
+                #         param.requires_grad = True
+                #     f.write("  ✓ class_embed unfrozen\n")
                 # if hasattr(predictor, 'mask_embed'):
                 #     for param in predictor.mask_embed.parameters():
                 #         param.requires_grad = True
@@ -127,12 +141,12 @@ class IncrementalMoETrainer(Trainer):
                                 f.write(f"  ✓ Router is frozen (as expected)\n")
 
             # Unfreeze VITA module prediction heads
-            if hasattr(model, 'vita_module'):
-                vita = model.vita_module
-                if hasattr(vita, 'class_embed'):
-                    for param in vita.class_embed.parameters():
-                        param.requires_grad = True
-                    f.write("  ✓ vita_module.class_embed unfrozen\n")
+            # if hasattr(model, 'vita_module'):
+            #     vita = model.vita_module
+            #     if hasattr(vita, 'class_embed'):
+            #         for param in vita.class_embed.parameters():
+            #             param.requires_grad = True
+            #         f.write("  ✓ vita_module.class_embed unfrozen\n")
                 # if hasattr(vita, 'mask_embed'):
                 #     for param in vita.mask_embed.parameters():
                 #         param.requires_grad = True
@@ -151,6 +165,12 @@ class IncrementalMoETrainer(Trainer):
             f.write("Trainable parameter names:\n")
             for name, param in model.named_parameters():
                 if param.requires_grad:
+                    f.write(f"  - {name}: {param.numel():,} params\n")
+
+            # List all untrainable parameters
+            f.write("unTrainable parameter names:\n")
+            for name, param in model.named_parameters():
+                if not param.requires_grad:
                     f.write(f"  - {name}: {param.numel():,} params\n")
 
         # Also print to console
