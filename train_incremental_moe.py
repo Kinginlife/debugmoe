@@ -33,7 +33,9 @@ class IncrementalMoETrainer(Trainer):
 
         # Merge only for incremental tasks where new_router may exist
         if self.cfg.CONT.TASK > 0:
-            merged = self._merge_incremental_router(self.model)
+            # Unwrap DDP so we can access model attributes directly
+            raw_model = self.model.module if hasattr(self.model, 'module') else self.model
+            merged = self._merge_incremental_router(raw_model)
             if merged:
                 print(f"Merged temporary router into base router for Task {self.cfg.CONT.TASK}")
                 checkpointer = DetectionCheckpointer(self.model, save_dir=self.cfg.OUTPUT_DIR)
@@ -60,7 +62,7 @@ class IncrementalMoETrainer(Trainer):
         return False
 
     @staticmethod
-    def _log_moe_trainability_status(model, current_task):
+    def _log_moe_trainability_status(model, current_task, output_dir):
         """Print explicit MoE trainability checks for task0/incremental tasks."""
         if not (hasattr(model, 'sem_seg_head') and hasattr(model.sem_seg_head, 'predictor')):
             return
@@ -83,20 +85,19 @@ class IncrementalMoETrainer(Trainer):
         if hasattr(last_ffn, 'new_router') and last_ffn.new_router is not None:
             new_router_trainable = any(p.requires_grad for p in last_ffn.new_router.parameters())
 
-        output_dir = model.cfg.OUTPUT_BASE if hasattr(model, 'cfg') else 'output'
         os.makedirs(output_dir, exist_ok=True)
 
         param1_file = os.path.join(output_dir, 'moecanshu.txt')
 
         with open(param1_file, 'w') as f:
-            f.write(f"[MoE Check][Task {current_task}] experts trainable: {expert_trainable}")
-            f.write(f"[MoE Check][Task {current_task}] base router trainable: {base_router_trainable}")
-            f.write(f"[MoE Check][Task {current_task}] new router trainable: {new_router_trainable}")
+            f.write(f"[MoE Check][Task {current_task}] experts trainable: {expert_trainable}\n")
+            f.write(f"[MoE Check][Task {current_task}] base router trainable: {base_router_trainable}\n")
+            f.write(f"[MoE Check][Task {current_task}] new router trainable: {new_router_trainable}\n")
 
             if current_task == 0:
-                f.write("[MoE Check][Task 0] Expectation: base router trainable=True, new_router=False, initial experts trainable.")
+                f.write("[MoE Check][Task 0] Expectation: base router trainable=True, new_router=False, initial experts trainable.\n")
             else:
-                f.write("[MoE Check][Incremental] Expectation: old experts/base router frozen, only new expert + new_router trainable.")
+                f.write("[MoE Check][Incremental] Expectation: old experts/base router frozen, only new expert + new_router trainable.\n")
         
 
     @classmethod
@@ -108,7 +109,7 @@ class IncrementalMoETrainer(Trainer):
             checkpointer = DetectionCheckpointer(model)
             checkpointer.load(cfg.CONT.WEIGHTS)
             # 加载完后，依然保持全部可训练，记录状态即可
-            cls._log_moe_trainability_status(model, cfg.CONT.TASK)
+            cls._log_moe_trainability_status(model, cfg.CONT.TASK, cfg.OUTPUT_DIR)
 
         # For Task 1+: Load previous task model and add exactly one new expert
         if cfg.CONT.TASK > 0 and cfg.CONT.WEIGHTS:
@@ -144,21 +145,19 @@ class IncrementalMoETrainer(Trainer):
                     print(f"Model moved to device: {device}")
 
             # Freeze all shared components AFTER adding new expert, so only the new one is trainable
-            cls._freeze_shared_components(model, cfg.CONT.TASK, cfg.CONT.BASE_EXPERTS)
-            cls._log_moe_trainability_status(model, cfg.CONT.TASK)
+            cls._freeze_shared_components(model, cfg.CONT.TASK, cfg.CONT.BASE_EXPERTS, cfg.OUTPUT_DIR)
+            cls._log_moe_trainability_status(model, cfg.CONT.TASK, cfg.OUTPUT_DIR)
         else:
             # Task 0 should keep base router and initial experts trainable
-            cls._log_moe_trainability_status(model, cfg.CONT.TASK)
+            cls._log_moe_trainability_status(model, cfg.CONT.TASK, cfg.OUTPUT_DIR)
 
         return model
 
     @staticmethod
-    def _freeze_shared_components(model, current_task, base_experts):
+    def _freeze_shared_components(model, current_task, base_experts, output_dir):
         """Freeze all shared components for incremental learning"""
         import os
 
-        # Get output directory from model's config
-        output_dir = model.cfg.OUTPUT_BASE if hasattr(model, 'cfg') else 'output'
         os.makedirs(output_dir, exist_ok=True)
 
         # Open file for writing parameter info

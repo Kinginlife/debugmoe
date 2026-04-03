@@ -81,7 +81,7 @@ python train_incremental_moe.py --num-gpus ${NGPUS} \
 for t in {2..10}; do
     CURR_OUT="${OUTPUT_BASE}/step${t}"
     PREV_STEP=$((t-1))
-    PREV_WEIGHTS="${OUTPUT_BASE}/step${PREV_STEP}/model_final.pth"
+    PREV_WEIGHTS="${OUTPUT_BASE}/step${PREV_STEP}/model_task${PREV_STEP}_router_merged.pth"
 
     echo ">>> Training Task ${t} with MoE (adding Expert ${t}, freezing shared components)"
     python train_incremental_moe.py --num-gpus ${NGPUS} \
