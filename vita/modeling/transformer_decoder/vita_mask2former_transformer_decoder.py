@@ -384,11 +384,11 @@ class VitaMultiScaleMaskedTransformerDecoder(nn.Module):
 
         # MoE parameters
         ret["use_moe"] = cfg.MODEL.MASK_FORMER.get("USE_MOE", False)
-        # IMPORTANT for incremental loading:
-        # - task0 builds with 1 expert
-        # - taskN (N>0) first builds with N experts (same as previous task), then adds 1 new expert after loading checkpoint
+        # IMPORTANT for incremental loading (base task starts with 2 experts):
+        # - task0 builds with 2 experts
+        # - taskN (N>0) first builds with (N+1) experts (same as previous task), then adds 1 new expert after loading checkpoint
         # This avoids duplicate expert creation.
-        ret["num_experts"] = cfg.CONT.TASK if (ret["use_moe"] and cfg.CONT.TASK > 0) else 1
+        ret["num_experts"] = (cfg.CONT.TASK + 1) if (ret["use_moe"] and cfg.CONT.TASK > 0) else 2
         ret["current_task"] = cfg.CONT.TASK
 
         return ret
@@ -408,7 +408,9 @@ class VitaMultiScaleMaskedTransformerDecoder(nn.Module):
                 activation="relu"
             )
             # Freeze old experts and router
-            last_ffn.freeze_old_experts(new_task_id)
+            # Base task has 2 experts, so for incremental task t the new expert index is (t + 1)
+            # and old experts are [0 ... t].
+            last_ffn.freeze_old_experts(new_task_id + 1)
             self.current_task = new_task_id
             self.num_experts = last_ffn.num_experts
 

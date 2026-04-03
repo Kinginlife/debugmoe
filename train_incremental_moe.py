@@ -56,7 +56,7 @@ class IncrementalMoETrainer(Trainer):
                         if hasattr(last_ffn, 'experts'):
                             after_cnt = len(last_ffn.experts)
 
-                    print(f"Expert count: before={before_cnt}, after={after_cnt}, expected={cfg.CONT.TASK + 1}")
+                    print(f"Expert count: before={before_cnt}, after={after_cnt}, expected={cfg.CONT.TASK + 2}")
 
                     # Move new expert to the same device as the model
                     device = next(model.parameters()).device
@@ -118,8 +118,9 @@ class IncrementalMoETrainer(Trainer):
                     last_ffn = predictor.transformer_ffn_layers[-1]
                     # Check if it's MoE layer
                     if hasattr(last_ffn, 'experts') and hasattr(last_ffn, 'num_experts'):
-                        # Only unfreeze the last expert (new expert for current task)
-                        new_expert_idx = current_task
+                        # Base task has 2 experts, so incremental task t adds expert at index (t + 1)
+                        # Only unfreeze this newly added expert.
+                        new_expert_idx = current_task + 1
                         if new_expert_idx < len(last_ffn.experts):
                             for param in last_ffn.experts[new_expert_idx].parameters():
                                 param.requires_grad = True

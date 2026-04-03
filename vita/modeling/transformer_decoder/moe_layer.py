@@ -21,7 +21,7 @@ class MoEFFNLayer(nn.Module):
         self,
         d_model,
         dim_feedforward=2048,
-        num_experts=1,
+        num_experts=2,
         current_task=0,
         dropout=0.0,
         activation="relu",
