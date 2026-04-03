@@ -14,7 +14,7 @@ STEP_ARGS="CONT.BASE_CLS 20 CONT.INC_CLS 2 CONT.MODE overlap SEED 42"
 METH_ARGS="MODEL.MASK_FORMER.TEST.MASK_BG False MODEL.MASK_FORMER.PER_PIXEL False MODEL.MASK_FORMER.FOCAL True"
 
 BASE_QUERIES=100
-ITER_BASE=10000
+ITER_BASE=5000
 
 
 
@@ -30,7 +30,7 @@ COMM_ARGS="${STEP_ARGS} ${WEIGHT_ARGS} ${METH_ARGS}"
 # ==========================================
 OUT_DIR_0="${OUTPUT_BASE}/step0"
 INC_ARGS_0="CONT.TASK 0 \
-            TEST.EVAL_PERIOD 2000 \
+            TEST.EVAL_PERIOD 2500 \
             SOLVER.CHECKPOINT_PERIOD 5000 \
             CONT.WEIGHTS vita_r50_coco.pth \
             SOLVER.MAX_ITER ${ITER_BASE}"
@@ -46,7 +46,7 @@ python train_incremental_moe.py --num-gpus ${NGPUS} \
 # ==========================================
 # Task 1 (First Incremental)
 # ==========================================
-ITER_INC=2500
+ITER_INC=500
 BASE_QUERIES_INC=100
 
 WEIGHT_ARGS_INC="MODEL.MASK_FORMER.NUM_OBJECT_QUERIES ${BASE_QUERIES_INC} \
@@ -65,7 +65,7 @@ python train_incremental_moe.py --num-gpus ${NGPUS} \
     --config-file ${CFG_FILE} \
     OUTPUT_DIR ${OUT_DIR_1} \
     CONT.WEIGHTS ${PRETRAINED_PATH} \
-    TEST.EVAL_PERIOD 100 \
+    TEST.EVAL_PERIOD 500 \
     CONT.TASK 1 \
     SOLVER.MAX_ITER ${ITER_INC} \
     ${COMM_ARGS_INC}

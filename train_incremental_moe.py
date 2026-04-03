@@ -179,9 +179,9 @@ class IncrementalMoETrainer(Trainer):
             # Unfreeze Query Embeddings
             if hasattr(model, 'sem_seg_head') and hasattr(model.sem_seg_head, 'predictor'):
                 predictor = model.sem_seg_head.predictor
-                if hasattr(predictor, 'query_feat'):
-                    predictor.query_feat.weight.requires_grad = True
-                    f.write("  ✓ query_feat unfrozen\n")
+                # if hasattr(predictor, 'query_feat'):
+                #     predictor.query_feat.weight.requires_grad = True
+                #     f.write("  ✓ query_feat unfrozen\n")
                 # if hasattr(predictor, 'query_embed'):
                 #     predictor.query_embed.weight.requires_grad = True
                 #     f.write("  ✓ query_embed unfrozen\n")
@@ -252,10 +252,10 @@ class IncrementalMoETrainer(Trainer):
                 # if hasattr(vita, 'mask_embed'):
                 #     for param in vita.mask_embed.parameters():
                 #         param.requires_grad = True
-                    f.write("  ✓ vita_module.mask_embed unfrozen\n")
-                if hasattr(vita, 'query_feat'):
-                    vita.query_feat.weight.requires_grad = True
-                    f.write("  ✓ vita_module query_feat unfrozen\n")
+                    # f.write("  ✓ vita_module.mask_embed unfrozen\n")
+                # if hasattr(vita, 'query_feat'):
+                #     vita.query_feat.weight.requires_grad = True
+                #     f.write("  ✓ vita_module query_feat unfrozen\n")
                 # if hasattr(vita, 'query_embed'):
                 #     vita.query_embed.weight.requires_grad = True
                 #     f.write("  ✓ vita_module query_embed unfrozen\n")

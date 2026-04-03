@@ -72,11 +72,28 @@ class MoEFFNLayer(nn.Module):
             logits = torch.cat([logits, new_logits], dim=-1)
         return logits
 
+    def _compute_top2_router_weights(self, x):
+        """Compute Top-2 sparse router weights over experts.
+
+        Returns:
+            router_weights: same shape as logits, only top-2 entries are non-zero and renormalized.
+        """
+        router_logits = self._compute_router_logits(x)
+        k = min(2, router_logits.shape[-1])
+
+        # Select top-k experts per token
+        topk_logits, topk_indices = torch.topk(router_logits, k=k, dim=-1)
+        topk_weights = F.softmax(topk_logits, dim=-1)
+
+        # Scatter sparse top-k weights back to full expert dimension
+        router_weights = torch.zeros_like(router_logits)
+        router_weights.scatter_(-1, topk_indices, topk_weights.to(router_weights.dtype))
+        return router_weights
+
     def forward_post(self, tgt):
         """Post-norm forward pass"""
-        # Router computes weights for each expert
-        router_logits = self._compute_router_logits(tgt)  # [seq_len, batch, num_experts]
-        router_weights = F.softmax(router_logits, dim=-1)
+        # Top-2 sparse routing weights for each token
+        router_weights = self._compute_top2_router_weights(tgt)  # [seq_len, batch, num_experts]
 
         # Weighted combination of all experts
         expert_outputs = []
@@ -99,8 +116,7 @@ class MoEFFNLayer(nn.Module):
         """Pre-norm forward pass"""
         tgt2 = self.norm(tgt)
 
-        router_logits = self._compute_router_logits(tgt2)
-        router_weights = F.softmax(router_logits, dim=-1)
+        router_weights = self._compute_top2_router_weights(tgt2)
 
         expert_outputs = []
         for i, expert in enumerate(self.experts):
