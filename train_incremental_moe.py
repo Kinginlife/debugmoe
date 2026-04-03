@@ -27,6 +27,75 @@ from continual import add_continual_config
 class IncrementalMoETrainer(Trainer):
     """Trainer for incremental learning with MoE"""
 
+    def train(self):
+        """Train then merge temporary incremental router into base router for clean checkpoints."""
+        results = super().train()
+
+        # Merge only for incremental tasks where new_router may exist
+        if self.cfg.CONT.TASK > 0:
+            merged = self._merge_incremental_router(self.model)
+            if merged:
+                print(f"Merged temporary router into base router for Task {self.cfg.CONT.TASK}")
+                checkpointer = DetectionCheckpointer(self.model, save_dir=self.cfg.OUTPUT_DIR)
+                checkpointer.save(f"model_task{self.cfg.CONT.TASK}_router_merged")
+                print("Saved merged checkpoint for next incremental task loading")
+
+        return results
+
+    @staticmethod
+    def _merge_incremental_router(model):
+        """Merge temporary new_router into base router if present."""
+        if not (hasattr(model, 'sem_seg_head') and hasattr(model.sem_seg_head, 'predictor')):
+            return False
+
+        predictor = model.sem_seg_head.predictor
+        if not hasattr(predictor, 'transformer_ffn_layers'):
+            return False
+
+        last_ffn = predictor.transformer_ffn_layers[-1]
+        if hasattr(last_ffn, 'fix_router') and hasattr(last_ffn, 'new_router') and last_ffn.new_router is not None:
+            last_ffn.fix_router()
+            return True
+
+        return False
+
+    @staticmethod
+    def _log_moe_trainability_status(model, current_task):
+        """Print explicit MoE trainability checks for task0/incremental tasks."""
+        if not (hasattr(model, 'sem_seg_head') and hasattr(model.sem_seg_head, 'predictor')):
+            return
+
+        predictor = model.sem_seg_head.predictor
+        if not hasattr(predictor, 'transformer_ffn_layers'):
+            return
+
+        last_ffn = predictor.transformer_ffn_layers[-1]
+        if not hasattr(last_ffn, 'experts'):
+            return
+
+        expert_trainable = []
+        for i, expert in enumerate(last_ffn.experts):
+            is_trainable = any(p.requires_grad for p in expert.parameters())
+            expert_trainable.append((i, is_trainable))
+
+        base_router_trainable = any(p.requires_grad for p in last_ffn.router.parameters()) if hasattr(last_ffn, 'router') else False
+        new_router_trainable = False
+        if hasattr(last_ffn, 'new_router') and last_ffn.new_router is not None:
+            new_router_trainable = any(p.requires_grad for p in last_ffn.new_router.parameters())
+
+        param1_file = os.path.join(output_dir, 'moecanshu.txt')
+
+        with open(param1_file, 'w') as f:
+            f.write(f"[MoE Check][Task {current_task}] experts trainable: {expert_trainable}")
+            f.write(f"[MoE Check][Task {current_task}] base router trainable: {base_router_trainable}")
+            f.write(f"[MoE Check][Task {current_task}] new router trainable: {new_router_trainable}")
+
+            if current_task == 0:
+                f.write("[MoE Check][Task 0] Expectation: base router trainable=True, new_router=False, initial experts trainable.")
+            else:
+                f.write("[MoE Check][Incremental] Expectation: old experts/base router frozen, only new expert + new_router trainable.")
+        
+
     @classmethod
     def build_model(cls, cfg):
         model = super().build_model(cfg)
@@ -65,6 +134,10 @@ class IncrementalMoETrainer(Trainer):
 
             # Freeze all shared components AFTER adding new expert, so only the new one is trainable
             cls._freeze_shared_components(model, cfg.CONT.TASK)
+            cls._log_moe_trainability_status(model, cfg.CONT.TASK)
+        else:
+            # Task 0 should keep base router and initial experts trainable
+            cls._log_moe_trainability_status(model, cfg.CONT.TASK)
 
         return model
 
@@ -133,16 +206,24 @@ class IncrementalMoETrainer(Trainer):
                                     if param.requires_grad:
                                         f.write(f"  ⚠ WARNING: Expert {i} is NOT frozen!\n")
 
-                            # Verify router is frozen
+                            # Verify base router is frozen
                             router_frozen = True
                             for param in last_ffn.router.parameters():
-                                if not param.requires_grad:
-                                    #param.requires_grad = True
-
-                                    router_frozen = True
-                                    f.write(f"  ⚠ WARNING: Router is NOT frozen!\n")
+                                if param.requires_grad:
+                                    router_frozen = False
+                                    f.write(f"  ⚠ WARNING: Base router is NOT frozen!\n")
                             if router_frozen:
-                                f.write(f"  ✓ Router is frozen (as expected)\n")
+                                f.write(f"  ✓ Base router is frozen (as expected)\n")
+
+                            # Verify temporary new_router is trainable in incremental task
+                            if hasattr(last_ffn, 'new_router') and last_ffn.new_router is not None:
+                                new_router_trainable = True
+                                for param in last_ffn.new_router.parameters():
+                                    if not param.requires_grad:
+                                        new_router_trainable = False
+                                        f.write(f"  ⚠ WARNING: New router is frozen unexpectedly!\n")
+                                if new_router_trainable:
+                                    f.write(f"  ✓ New router is trainable (as expected)\n")
 
             # Unfreeze VITA module prediction heads
             if hasattr(model, 'vita_module'):

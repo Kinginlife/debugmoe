@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
 
 
 class MoEFFNLayer(nn.Module):
@@ -35,8 +34,10 @@ class MoEFFNLayer(nn.Module):
         self.current_task = current_task
         self.normalize_before = normalize_before
 
-        # Router: outputs weight for each expert
+        # Base router: historical dimensions (frozen in incremental phase)
         self.router = nn.Linear(d_model, num_experts)
+        # New router head for the current incremental task (1-dim)
+        self.new_router = None
 
         # Experts: each expert is an independent FFN
         self.experts = nn.ModuleList([
@@ -63,16 +64,19 @@ class MoEFFNLayer(nn.Module):
             nn.Linear(dim_feedforward, d_model)
         )
 
+    def _compute_router_logits(self, x):
+        """Compute router logits, concatenating temporary new router if present."""
+        logits = self.router(x)
+        if self.new_router is not None:
+            new_logits = self.new_router(x)
+            logits = torch.cat([logits, new_logits], dim=-1)
+        return logits
+
     def forward_post(self, tgt):
         """Post-norm forward pass"""
         # Router computes weights for each expert
-        router_logits = self.router(tgt)  # [seq_len, batch, num_experts]
+        router_logits = self._compute_router_logits(tgt)  # [seq_len, batch, num_experts]
         router_weights = F.softmax(router_logits, dim=-1)
-        # # ====== DEBUG 专用代码：强制所有权重分配给 Expert 0 ======
-        # # 把所有权重清零
-        # router_weights = torch.zeros_like(router_weights)
-        # # 强制 Expert 0 (Task 0的旧专家) 权重为 1.0
-        # router_weights[..., 0] = 1.0
 
         # Weighted combination of all experts
         expert_outputs = []
@@ -95,13 +99,8 @@ class MoEFFNLayer(nn.Module):
         """Pre-norm forward pass"""
         tgt2 = self.norm(tgt)
 
-        router_logits = self.router(tgt2)
+        router_logits = self._compute_router_logits(tgt2)
         router_weights = F.softmax(router_logits, dim=-1)
-        # # ====== DEBUG 专用代码：强制所有权重分配给 Expert 0 ======
-        # # 把所有权重清零
-        # router_weights = torch.zeros_like(router_weights)
-        # # 强制 Expert 0 (Task 0的旧专家) 权重为 1.0
-        # router_weights[..., 0] = 1.0
 
         expert_outputs = []
         for i, expert in enumerate(self.experts):
@@ -124,35 +123,54 @@ class MoEFFNLayer(nn.Module):
         return self.forward_post(tgt)
 
     def freeze_old_experts(self, current_task):
-        """Freeze old experts (0 to current_task-1) and router"""
+        """Freeze old experts (0 to current_task-1) and base router."""
         # Freeze old experts
         for i in range(current_task):
             if i < len(self.experts):
                 for param in self.experts[i].parameters():
                     param.requires_grad = False
 
-        # Freeze router
+        # Freeze historical router dimensions
         for param in self.router.parameters():
             param.requires_grad = False
+            param.grad = None
+
+        # Keep newly added router dimension trainable
+        if self.new_router is not None:
+            for param in self.new_router.parameters():
+                param.requires_grad = True
 
     def add_new_expert(self, d_model, dim_feedforward, dropout, activation):
-        """Add a new expert for new task"""
+        """Add a new expert and a temporary 1-dim router head for new task."""
         new_expert = self._create_expert(d_model, dim_feedforward, dropout, activation)
         self.experts.append(new_expert)
 
-        # Expand router output dimension
-        old_router = self.router
-        self.router = nn.Linear(d_model, self.num_experts + 1)
+        # Create temporary new router dimension (trainable only for current task)
+        self.new_router = nn.Linear(d_model, 1)
+        self.new_router = self.new_router.to(self.router.weight.device)
 
-        # Copy old weights
         with torch.no_grad():
-            self.router.weight[:self.num_experts] = old_router.weight
-            self.router.bias[:self.num_experts] = old_router.bias
-            nn.init.zeros_(self.router.weight[self.num_experts])
-            self.router.bias[self.num_experts] = -10
+            nn.init.zeros_(self.new_router.weight)
+            self.new_router.bias.fill_(-1.0)
 
         self.num_experts += 1
         self.current_task += 1
+
+    def fix_router(self):
+        """Merge temporary new_router into router and clear new_router."""
+        if self.new_router is None:
+            return
+
+        trained_router = nn.Linear(self.d_model, self.router.out_features + 1).to(self.router.weight.device)
+
+        with torch.no_grad():
+            trained_router.weight[:-1].copy_(self.router.weight.data)
+            trained_router.bias[:-1].copy_(self.router.bias.data)
+            trained_router.weight[-1:].copy_(self.new_router.weight.data)
+            trained_router.bias[-1:].copy_(self.new_router.bias.data)
+
+        self.router = trained_router
+        self.new_router = None
 
 
 def _get_activation_fn(activation):
@@ -164,4 +182,3 @@ def _get_activation_fn(activation):
     if activation == "glu":
         return F.glu
     raise RuntimeError(f"activation should be relu/gelu, not {activation}.")
-
