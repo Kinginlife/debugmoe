@@ -83,6 +83,9 @@ class IncrementalMoETrainer(Trainer):
         if hasattr(last_ffn, 'new_router') and last_ffn.new_router is not None:
             new_router_trainable = any(p.requires_grad for p in last_ffn.new_router.parameters())
 
+        output_dir = model.cfg.OUTPUT_BASE if hasattr(model, 'cfg') else 'output'
+        os.makedirs(output_dir, exist_ok=True)
+
         param1_file = os.path.join(output_dir, 'moecanshu.txt')
 
         with open(param1_file, 'w') as f:
@@ -99,6 +102,13 @@ class IncrementalMoETrainer(Trainer):
     @classmethod
     def build_model(cls, cfg):
         model = super().build_model(cfg)
+        # 【新增这段代码】：专门为了 Task 0 加载 COCO 预训练权重
+        if cfg.CONT.TASK == 0 and cfg.CONT.WEIGHTS:
+            print(f"Loading Task 0 Base model from {cfg.CONT.WEIGHTS}")
+            checkpointer = DetectionCheckpointer(model)
+            checkpointer.load(cfg.CONT.WEIGHTS)
+            # 加载完后，依然保持全部可训练，记录状态即可
+            cls._log_moe_trainability_status(model, cfg.CONT.TASK)
 
         # For Task 1+: Load previous task model and add exactly one new expert
         if cfg.CONT.TASK > 0 and cfg.CONT.WEIGHTS:
@@ -147,7 +157,7 @@ class IncrementalMoETrainer(Trainer):
         import os
 
         # Get output directory from model's config
-        output_dir = model.cfg.OUTPUT_DIR if hasattr(model, 'cfg') else 'output'
+        output_dir = model.cfg.OUTPUT_BASE if hasattr(model, 'cfg') else 'output'
         os.makedirs(output_dir, exist_ok=True)
 
         # Open file for writing parameter info
@@ -172,19 +182,19 @@ class IncrementalMoETrainer(Trainer):
                 if hasattr(predictor, 'query_feat'):
                     predictor.query_feat.weight.requires_grad = True
                     f.write("  ✓ query_feat unfrozen\n")
-                if hasattr(predictor, 'query_embed'):
-                    predictor.query_embed.weight.requires_grad = True
-                    f.write("  ✓ query_embed unfrozen\n")
+                # if hasattr(predictor, 'query_embed'):
+                #     predictor.query_embed.weight.requires_grad = True
+                #     f.write("  ✓ query_embed unfrozen\n")
 
                 # Unfreeze Prediction Heads
                 if hasattr(predictor, 'class_embed'):
                     for param in predictor.class_embed.parameters():
                         param.requires_grad = True
                     f.write("  ✓ class_embed unfrozen\n")
-                if hasattr(predictor, 'mask_embed'):
-                    for param in predictor.mask_embed.parameters():
-                        param.requires_grad = True
-                    f.write("  ✓ mask_embed unfrozen\n")
+                # if hasattr(predictor, 'mask_embed'):
+                #     for param in predictor.mask_embed.parameters():
+                #         param.requires_grad = True
+                #     f.write("  ✓ mask_embed unfrozen\n")
 
                 # Unfreeze ONLY the new Expert in MoE layer
                 if hasattr(predictor, 'transformer_ffn_layers'):
@@ -215,12 +225,19 @@ class IncrementalMoETrainer(Trainer):
                             if router_frozen:
                                 f.write(f"  ✓ Base router is frozen (as expected)\n")
 
+                            # Unfreeze temporary new_router in incremental task
+                            if hasattr(last_ffn, 'new_router') and last_ffn.new_router is not None:
+                                for param in last_ffn.new_router.parameters():
+                                    param.requires_grad = True
+                                f.write(f"  ✓ New router is unfrozen and trainable\n")
+
                             # Verify temporary new_router is trainable in incremental task
                             if hasattr(last_ffn, 'new_router') and last_ffn.new_router is not None:
                                 new_router_trainable = True
                                 for param in last_ffn.new_router.parameters():
                                     if not param.requires_grad:
                                         new_router_trainable = False
+
                                         f.write(f"  ⚠ WARNING: New router is frozen unexpectedly!\n")
                                 if new_router_trainable:
                                     f.write(f"  ✓ New router is trainable (as expected)\n")
@@ -232,16 +249,16 @@ class IncrementalMoETrainer(Trainer):
                     for param in vita.class_embed.parameters():
                         param.requires_grad = True
                     f.write("  ✓ vita_module.class_embed unfrozen\n")
-                if hasattr(vita, 'mask_embed'):
-                    for param in vita.mask_embed.parameters():
-                        param.requires_grad = True
+                # if hasattr(vita, 'mask_embed'):
+                #     for param in vita.mask_embed.parameters():
+                #         param.requires_grad = True
                     f.write("  ✓ vita_module.mask_embed unfrozen\n")
                 if hasattr(vita, 'query_feat'):
                     vita.query_feat.weight.requires_grad = True
                     f.write("  ✓ vita_module query_feat unfrozen\n")
-                if hasattr(vita, 'query_embed'):
-                    vita.query_embed.weight.requires_grad = True
-                    f.write("  ✓ vita_module query_embed unfrozen\n")
+                # if hasattr(vita, 'query_embed'):
+                #     vita.query_embed.weight.requires_grad = True
+                #     f.write("  ✓ vita_module query_embed unfrozen\n")
 
             # Print trainable parameters summary
             total_params = sum(p.numel() for p in model.parameters())
