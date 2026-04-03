@@ -135,7 +135,8 @@ class IncrementalMoETrainer(Trainer):
                         if hasattr(last_ffn, 'experts'):
                             after_cnt = len(last_ffn.experts)
 
-                    print(f"Expert count: before={before_cnt}, after={after_cnt}, expected={cfg.CONT.TASK + 2}")
+                    expected_cnt = cfg.CONT.BASE_EXPERTS + cfg.CONT.TASK
+                    print(f"Expert count: before={before_cnt}, after={after_cnt}, expected={expected_cnt}")
 
                     # Move new expert to the same device as the model
                     device = next(model.parameters()).device
@@ -143,7 +144,7 @@ class IncrementalMoETrainer(Trainer):
                     print(f"Model moved to device: {device}")
 
             # Freeze all shared components AFTER adding new expert, so only the new one is trainable
-            cls._freeze_shared_components(model, cfg.CONT.TASK)
+            cls._freeze_shared_components(model, cfg.CONT.TASK, cfg.CONT.BASE_EXPERTS)
             cls._log_moe_trainability_status(model, cfg.CONT.TASK)
         else:
             # Task 0 should keep base router and initial experts trainable
@@ -152,7 +153,7 @@ class IncrementalMoETrainer(Trainer):
         return model
 
     @staticmethod
-    def _freeze_shared_components(model, current_task):
+    def _freeze_shared_components(model, current_task, base_experts):
         """Freeze all shared components for incremental learning"""
         import os
 
@@ -201,9 +202,9 @@ class IncrementalMoETrainer(Trainer):
                     last_ffn = predictor.transformer_ffn_layers[-1]
                     # Check if it's MoE layer
                     if hasattr(last_ffn, 'experts') and hasattr(last_ffn, 'num_experts'):
-                        # Base task has 2 experts, so incremental task t adds expert at index (t + 1)
+                        # With BASE_EXPERTS base experts, incremental task t adds expert at index (BASE_EXPERTS + t - 1)
                         # Only unfreeze this newly added expert.
-                        new_expert_idx = current_task + 1
+                        new_expert_idx = base_experts + current_task - 1
                         if new_expert_idx < len(last_ffn.experts):
                             for param in last_ffn.experts[new_expert_idx].parameters():
                                 param.requires_grad = True

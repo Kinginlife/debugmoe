@@ -250,6 +250,7 @@ class VitaMultiScaleMaskedTransformerDecoder(nn.Module):
         use_moe: bool = False,
         num_experts: int = 1,
         current_task: int = 0,
+        base_experts: int = 2,
     ):
         """
         NOTE: this interface is experimental.
@@ -287,6 +288,7 @@ class VitaMultiScaleMaskedTransformerDecoder(nn.Module):
         self.use_moe = use_moe
         self.num_experts = num_experts
         self.current_task = current_task
+        self.base_experts = base_experts
 
         for i in range(self.num_layers):
             self.transformer_self_attention_layers.append(
@@ -384,12 +386,18 @@ class VitaMultiScaleMaskedTransformerDecoder(nn.Module):
 
         # MoE parameters
         ret["use_moe"] = cfg.MODEL.MASK_FORMER.get("USE_MOE", False)
-        # IMPORTANT for incremental loading (base task starts with 2 experts):
-        # - task0 builds with 2 experts
-        # - taskN (N>0) first builds with (N+1) experts (same as previous task), then adds 1 new expert after loading checkpoint
+        base_experts = cfg.CONT.get("BASE_EXPERTS", 2)
+        # IMPORTANT for incremental loading with configurable base experts:
+        # - task0 builds with BASE_EXPERTS experts
+        # - taskN (N>0) first builds with (BASE_EXPERTS + N - 1) experts (same as previous task),
+        #   then adds 1 new expert after loading checkpoint.
         # This avoids duplicate expert creation.
-        ret["num_experts"] = (cfg.CONT.TASK + 1) if (ret["use_moe"] and cfg.CONT.TASK > 0) else 2
+        if ret["use_moe"]:
+            ret["num_experts"] = base_experts if cfg.CONT.TASK == 0 else (base_experts + cfg.CONT.TASK - 1)
+        else:
+            ret["num_experts"] = 1
         ret["current_task"] = cfg.CONT.TASK
+        ret["base_experts"] = base_experts
 
         return ret
 
@@ -408,9 +416,9 @@ class VitaMultiScaleMaskedTransformerDecoder(nn.Module):
                 activation="relu"
             )
             # Freeze old experts and router
-            # Base task has 2 experts, so for incremental task t the new expert index is (t + 1)
-            # and old experts are [0 ... t].
-            last_ffn.freeze_old_experts(new_task_id + 1)
+            # With BASE_EXPERTS base experts, incremental task t adds expert at index (BASE_EXPERTS + t - 1),
+            # so old experts are [0 ... BASE_EXPERTS + t - 2].
+            last_ffn.freeze_old_experts(self.base_experts + new_task_id - 1)
             self.current_task = new_task_id
             self.num_experts = last_ffn.num_experts
 

@@ -16,6 +16,9 @@ def add_continual_config(cfg):
     cfg.CONT.COSINE = False
     cfg.CONT.USE_BIAS = True
     cfg.CONT.WA_STEP = 0
+    # Number of experts used in base task (task0) when MoE is enabled.
+    # Incremental task t will use BASE_EXPERTS + t experts.
+    cfg.CONT.BASE_EXPERTS = 2
 
     cfg.CONT.DIST = CN()
     cfg.CONT.DIST.POD_WEIGHT = 0.
