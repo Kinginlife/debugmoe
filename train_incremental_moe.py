@@ -96,22 +96,22 @@ class IncrementalMoETrainer(Trainer):
             # Unfreeze Query Embeddings
             if hasattr(model, 'sem_seg_head') and hasattr(model.sem_seg_head, 'predictor'):
                 predictor = model.sem_seg_head.predictor
-                # if hasattr(predictor, 'query_feat'):
-                #     predictor.query_feat.weight.requires_grad = True
-                #     f.write("  ✓ query_feat unfrozen\n")
-                # if hasattr(predictor, 'query_embed'):
-                #     predictor.query_embed.weight.requires_grad = True
-                #     f.write("  ✓ query_embed unfrozen\n")
+                if hasattr(predictor, 'query_feat'):
+                    predictor.query_feat.weight.requires_grad = True
+                    f.write("  ✓ query_feat unfrozen\n")
+                if hasattr(predictor, 'query_embed'):
+                    predictor.query_embed.weight.requires_grad = True
+                    f.write("  ✓ query_embed unfrozen\n")
 
                 # Unfreeze Prediction Heads
-                # if hasattr(predictor, 'class_embed'):
-                #     for param in predictor.class_embed.parameters():
-                #         param.requires_grad = True
-                #     f.write("  ✓ class_embed unfrozen\n")
-                # if hasattr(predictor, 'mask_embed'):
-                #     for param in predictor.mask_embed.parameters():
-                #         param.requires_grad = True
-                #     f.write("  ✓ mask_embed unfrozen\n")
+                if hasattr(predictor, 'class_embed'):
+                    for param in predictor.class_embed.parameters():
+                        param.requires_grad = True
+                    f.write("  ✓ class_embed unfrozen\n")
+                if hasattr(predictor, 'mask_embed'):
+                    for param in predictor.mask_embed.parameters():
+                        param.requires_grad = True
+                    f.write("  ✓ mask_embed unfrozen\n")
 
                 # Unfreeze ONLY the new Expert in MoE layer
                 if hasattr(predictor, 'transformer_ffn_layers'):
@@ -123,6 +123,7 @@ class IncrementalMoETrainer(Trainer):
                         if new_expert_idx < len(last_ffn.experts):
                             for param in last_ffn.experts[new_expert_idx].parameters():
                                 param.requires_grad = True
+                                
                             f.write(f"  ✓ Expert {new_expert_idx} (new expert) unfrozen\n")
 
                             # Verify old experts are frozen
@@ -134,23 +135,31 @@ class IncrementalMoETrainer(Trainer):
                             # Verify router is frozen
                             router_frozen = True
                             for param in last_ffn.router.parameters():
-                                if param.requires_grad:
-                                    router_frozen = False
+                                if not param.requires_grad:
+                                    #param.requires_grad = True
+
+                                    router_frozen = True
                                     f.write(f"  ⚠ WARNING: Router is NOT frozen!\n")
                             if router_frozen:
                                 f.write(f"  ✓ Router is frozen (as expected)\n")
 
             # Unfreeze VITA module prediction heads
-            # if hasattr(model, 'vita_module'):
-            #     vita = model.vita_module
-            #     if hasattr(vita, 'class_embed'):
-            #         for param in vita.class_embed.parameters():
-            #             param.requires_grad = True
-            #         f.write("  ✓ vita_module.class_embed unfrozen\n")
-                # if hasattr(vita, 'mask_embed'):
-                #     for param in vita.mask_embed.parameters():
-                #         param.requires_grad = True
-                #     f.write("  ✓ vita_module.mask_embed unfrozen\n")
+            if hasattr(model, 'vita_module'):
+                vita = model.vita_module
+                if hasattr(vita, 'class_embed'):
+                    for param in vita.class_embed.parameters():
+                        param.requires_grad = True
+                    f.write("  ✓ vita_module.class_embed unfrozen\n")
+                if hasattr(vita, 'mask_embed'):
+                    for param in vita.mask_embed.parameters():
+                        param.requires_grad = True
+                    f.write("  ✓ vita_module.mask_embed unfrozen\n")
+                if hasattr(vita, 'query_feat'):
+                    vita.query_feat.weight.requires_grad = True
+                    f.write("  ✓ vita_module query_feat unfrozen\n")
+                if hasattr(vita, 'query_embed'):
+                    vita.query_embed.weight.requires_grad = True
+                    f.write("  ✓ vita_module query_embed unfrozen\n")
 
             # Print trainable parameters summary
             total_params = sum(p.numel() for p in model.parameters())
