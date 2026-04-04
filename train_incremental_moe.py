@@ -22,6 +22,68 @@ from detectron2.projects.deeplab import add_deeplab_config
 from mask2former import add_maskformer2_config
 from vita import add_vita_config
 from continual import add_continual_config
+import torch
+import torch.distributed as dist
+import detectron2.utils.comm as comm
+
+class SVDManager:
+    def __init__(self, feature_dim=256):
+        self.cov_frame = torch.zeros(feature_dim, feature_dim).cuda()
+        self.cov_clip = torch.zeros(feature_dim, feature_dim).cuda()
+
+    def hook_frame(self, module, input, output):
+        # 收集 Frame 级特征
+        x = input[0].detach().reshape(-1, input[0].shape[-1])
+        self.cov_frame += torch.matmul(x.T, x)
+
+    def hook_clip(self, module, input, output):
+        # 收集 Clip (VITA) 级特征
+        x = input[0].detach().reshape(-1, input[0].shape[-1])
+        self.cov_clip += torch.matmul(x.T, x)
+
+    def sync_covariance(self):
+        """DDP 多卡环境下，将所有 GPU 的协方差矩阵同步求和"""
+        if comm.get_world_size() > 1:
+            dist.all_reduce(self.cov_frame, op=dist.ReduceOp.SUM)
+            dist.all_reduce(self.cov_clip, op=dist.ReduceOp.SUM)
+
+    @staticmethod
+    def update_basis(old_U, cov_matrix, threshold=0.7):
+        # 1. 投影到老任务零空间
+        if old_U is not None:
+            I = torch.eye(cov_matrix.shape[0], device=cov_matrix.device)
+            P_old = I - torch.matmul(old_U, old_U.T)
+            cov_matrix = torch.matmul(P_old, torch.matmul(cov_matrix, P_old))
+
+        # 2. SVD 分解
+        U, S, V = torch.linalg.svd(cov_matrix)
+        
+        # 3. 按能量阈值截断
+        total_var = torch.sum(S)
+        curr_var = 0
+        k = 0
+        for i in range(len(S)):
+            curr_var += S[i]
+            if curr_var / (total_var + 1e-8) > threshold:
+                k = i + 1
+                break
+        
+        U_new = U[:, :k]
+
+        # 4. 合并并【重新正交化 (QR 分解)】
+        if old_U is not None:
+            U_combined = torch.cat([old_U, U_new], dim=1)
+            # 使用 QR 分解提取严格的正交基 (Q 矩阵)
+            Q, R = torch.linalg.qr(U_combined, mode='reduced')
+            U_combined = Q
+        else:
+            U_combined = U_new
+
+        # 5. 计算绝对安全的梯度投影矩阵 P
+        I = torch.eye(cov_matrix.shape[0], device=cov_matrix.device)
+        P_new = I - torch.matmul(U_combined, U_combined.T)
+
+        return U_combined, P_new
 
 
 class IncrementalMoETrainer(Trainer):
@@ -41,6 +103,12 @@ class IncrementalMoETrainer(Trainer):
                 checkpointer = DetectionCheckpointer(self.model, save_dir=self.cfg.OUTPUT_DIR)
                 checkpointer.save(f"model_task{self.cfg.CONT.TASK}_router_merged")
                 print("Saved merged checkpoint for next incremental task loading")
+
+        # ======【新增：训练完成后提取特征保存 SVD】======
+        # 注意：每次训练完 (包含 Task 0) 都要收集！
+        raw_model = self.model.module if hasattr(self.model, 'module') else self.model
+        self.collect_and_save_svd(self.cfg, raw_model, self.cfg.CONT.TASK)
+        # ================================================
 
         return results
 
@@ -98,6 +166,71 @@ class IncrementalMoETrainer(Trainer):
                 f.write("[MoE Check][Task 0] Expectation: base router trainable=True, new_router=False, initial experts trainable.\n")
             else:
                 f.write("[MoE Check][Incremental] Expectation: old experts/base router frozen, only new expert + new_router trainable.\n")
+
+    @classmethod
+    def collect_and_save_svd(cls, cfg, model, current_task):
+        svd_log_path = os.path.join(cfg.OUTPUT_DIR, "svd.txt")
+
+        def log_svd(msg):
+            if comm.is_main_process():
+                with open(svd_log_path, "a") as f:
+                    f.write(msg + "\n")
+
+        log_svd(f"[SVD] 正在为 Task {current_task} 收集特征并计算全局正交基...")
+
+        model.eval()
+        svd_manager = SVDManager(feature_dim=cfg.MODEL.MASK_FORMER.HIDDEN_DIM)
+
+        # 1. 挂载 Forward Hook (所有卡)
+        h1 = model.sem_seg_head.predictor.class_embed.register_forward_hook(svd_manager.hook_frame)
+        h2 = model.vita_module.class_embed.register_forward_hook(svd_manager.hook_clip)
+
+        # 2. 构造 Dataloader 跑少量数据 (约 100 个 iter)
+        data_loader = cls.build_train_loader(cfg)
+        max_iters = max(1, 100 // comm.get_world_size())
+        
+        with torch.no_grad():
+            for idx, batch in enumerate(data_loader):
+                if idx >= max_iters:
+                    break
+                model(batch)
+        
+        h1.remove()
+        h2.remove()
+
+        # 3. 同步多卡协方差
+        svd_manager.sync_covariance()
+
+        # 4. 加载上一个任务的老正交基
+        old_U_frame, old_U_clip = None, None
+        if current_task > 0:
+            prev_dir = f"{cfg.OUTPUT_DIR}/../step{current_task-1}"
+            old_svd_path = os.path.join(prev_dir, f"svd_task{current_task-1}.pth")
+            if os.path.exists(old_svd_path):
+                old_svd = torch.load(old_svd_path, map_location="cpu")
+                old_U_frame = old_svd["U_frame"].cuda()
+                old_U_clip = old_svd["U_clip"].cuda()
+
+        # 5. 更新基向量并计算投影矩阵 P
+        svd_threshold = cfg.CONT.SVD_THRESHOLD
+        log_svd(f"[SVD] 使用能量阈值 threshold={svd_threshold}")
+        U_frame, P_frame = SVDManager.update_basis(old_U_frame, svd_manager.cov_frame, threshold=svd_threshold)
+        U_clip, P_clip = SVDManager.update_basis(old_U_clip, svd_manager.cov_clip, threshold=svd_threshold)
+
+        # 6. 主进程保存文件
+        if comm.is_main_process():
+            log_svd(f"[SVD] Frame 全局基向量累积维度: {U_frame.shape[1]}/256")
+            log_svd(f"[SVD] Clip  全局基向量累积维度: {U_clip.shape[1]}/256")
+
+            save_path = os.path.join(cfg.OUTPUT_DIR, f"svd_task{current_task}.pth")
+            torch.save({
+                "U_frame": U_frame.cpu(), "P_frame": P_frame.cpu(),
+                "U_clip": U_clip.cpu(), "P_clip": P_clip.cpu()
+            }, save_path)
+            log_svd(f"[SVD] 全局 SVD 投影矩阵已保存至: {save_path}")
+        
+        # 强制同步，防止其他进程提前进入下一步
+        comm.synchronize()
         
 
     @classmethod
@@ -145,7 +278,14 @@ class IncrementalMoETrainer(Trainer):
                     print(f"Model moved to device: {device}")
 
             # Freeze all shared components AFTER adding new expert, so only the new one is trainable
-            cls._freeze_shared_components(model, cfg.CONT.TASK, cfg.CONT.BASE_EXPERTS, cfg.OUTPUT_DIR)
+            cls._freeze_shared_components(
+                model,
+                cfg.CONT.TASK,
+                cfg.CONT.BASE_EXPERTS,
+                cfg.OUTPUT_DIR,
+                cfg.CONT.BASE_CLS,
+                cfg.CONT.INC_CLS,
+            )
             cls._log_moe_trainability_status(model, cfg.CONT.TASK, cfg.OUTPUT_DIR)
         else:
             # Task 0 should keep base router and initial experts trainable
@@ -154,11 +294,41 @@ class IncrementalMoETrainer(Trainer):
         return model
 
     @staticmethod
-    def _freeze_shared_components(model, current_task, base_experts, output_dir):
+    def _freeze_shared_components(model, current_task, base_experts, output_dir, base_cls, inc_cls):
         """Freeze all shared components for incremental learning"""
         import os
 
         os.makedirs(output_dir, exist_ok=True)
+
+        # ======【新增：加载上一个任务的 SVD 投影矩阵】======
+        num_old_classes = (
+            base_cls + (current_task - 1) * inc_cls
+            if current_task > 0 else base_cls
+        )
+        P_frame, P_clip = None, None
+        if current_task > 0:
+            prev_dir = f"{output_dir}/../step{current_task-1}"
+            svd_path = os.path.join(prev_dir, f"svd_task{current_task-1}.pth")
+            if os.path.exists(svd_path):
+                device = next(model.parameters()).device
+                svd_data = torch.load(svd_path, map_location=device)
+                P_frame = svd_data["P_frame"]
+                P_clip = svd_data["P_clip"]
+            
+            # 权重投影 Hook (保护 W)
+            def get_weight_hook(P_matrix):
+                def hook(grad):
+                    return torch.matmul(grad, P_matrix)
+                return hook
+
+            # 偏置掩码 Hook (保护 b)
+            def get_bias_hook(num_old_cls):
+                def hook(grad):
+                    grad_clone = grad.clone()
+                    # 强行将老类别的梯度清零，不让老类别 Bias 发生任何偏移
+                    grad_clone[:num_old_cls] = 0.0 
+                    return grad_clone
+                return hook
 
         # Open file for writing parameter info
         param_file = os.path.join(output_dir, 'canshu.txt')
@@ -187,10 +357,19 @@ class IncrementalMoETrainer(Trainer):
                 #     f.write("  ✓ query_embed unfrozen\n")
 
                 # Unfreeze Prediction Heads
+                        
+                    # ======= 针对 Frame 头 =======
                 if hasattr(predictor, 'class_embed'):
-                    for param in predictor.class_embed.parameters():
+                    for name, param in predictor.class_embed.named_parameters():
                         param.requires_grad = True
-                    f.write("  ✓ class_embed unfrozen\n")
+                    
+                        if current_task > 0 and P_frame is not None:
+                            if 'weight' in name:
+                                param.register_hook(get_weight_hook(P_frame))
+                                f.write("  ✓ predictor.class_embed.weight SVD hooked!\n")
+                            elif 'bias' in name:
+                                param.register_hook(get_bias_hook(num_old_classes))
+                                f.write("  ✓ predictor.class_embed.bias Mask hooked!\n")
                 # if hasattr(predictor, 'mask_embed'):
                 #     for param in predictor.mask_embed.parameters():
                 #         param.requires_grad = True
@@ -242,13 +421,20 @@ class IncrementalMoETrainer(Trainer):
                                 if new_router_trainable:
                                     f.write(f"  ✓ New router is trainable (as expected)\n")
 
-            # Unfreeze VITA module prediction heads
+            # ======= 针对 Clip (VITA) 头 =======
             if hasattr(model, 'vita_module'):
                 vita = model.vita_module
                 if hasattr(vita, 'class_embed'):
-                    for param in vita.class_embed.parameters():
+                    for name, param in vita.class_embed.named_parameters():
                         param.requires_grad = True
-                    f.write("  ✓ vita_module.class_embed unfrozen\n")
+                        
+                        if current_task > 0 and P_clip is not None:
+                            if 'weight' in name:
+                                param.register_hook(get_weight_hook(P_clip))
+                                f.write("  ✓ vita_module.class_embed.weight SVD hooked!\n")
+                            elif 'bias' in name:
+                                param.register_hook(get_bias_hook(num_old_classes))
+                                f.write("  ✓ vita_module.class_embed.bias Mask hooked!\n")
                 # if hasattr(vita, 'mask_embed'):
                 #     for param in vita.mask_embed.parameters():
                 #         param.requires_grad = True

@@ -19,6 +19,9 @@ def add_continual_config(cfg):
     # Number of experts used in base task (task0) when MoE is enabled.
     # Incremental task t will use BASE_EXPERTS + t experts.
     cfg.CONT.BASE_EXPERTS = 2
+    # SVD energy threshold for subspace update in incremental MoE training.
+    # Can be overridden from script by passing: CONT.SVD_THRESHOLD <value>
+    cfg.CONT.SVD_THRESHOLD = 0.95
 
     cfg.CONT.DIST = CN()
     cfg.CONT.DIST.POD_WEIGHT = 0.
