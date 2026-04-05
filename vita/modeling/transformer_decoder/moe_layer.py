@@ -24,7 +24,8 @@ class MoEFFNLayer(nn.Module):
         current_task=0,
         dropout=0.0,
         activation="relu",
-        normalize_before=False
+        normalize_before=False,
+        router_svd_energy=0.99,
     ):
         super().__init__()
 
@@ -33,11 +34,15 @@ class MoEFFNLayer(nn.Module):
         self.num_experts = num_experts
         self.current_task = current_task
         self.normalize_before = normalize_before
+        self.router_svd_energy = router_svd_energy
+        self.old_router_basis = None
 
         # Base router: historical dimensions (frozen in incremental phase)
         self.router = nn.Linear(d_model, num_experts)
-        # New router head for the current incremental task (1-dim)
+        # New router head for the current incremental task (1-dim, no bias)
         self.new_router = None
+        # Right singular vectors of old router row-space: shape [d_model, r]
+        self.register_buffer("old_router_basis", None, persistent=False)
 
         # Experts: each expert is an independent FFN
         self.experts = nn.ModuleList([
@@ -156,18 +161,78 @@ class MoEFFNLayer(nn.Module):
             for param in self.new_router.parameters():
                 param.requires_grad = True
 
+    def _compute_old_router_basis(self, energy_ratio=0.99):
+        """Compute right singular vectors spanning old router row-space."""
+        with torch.no_grad():
+            w = self.router.weight.detach()  # [num_old_experts, d_model]
+            if w.numel() == 0:
+                self.old_router_basis = None
+                return
+
+            # Full SVD on old router rows
+            # w = U S Vh, row-space basis in columns of V = Vh^T
+            _, s, vh = torch.linalg.svd(w, full_matrices=False)
+            if s.numel() == 0:
+                self.old_router_basis = None
+                return
+
+            s2 = s.pow(2)
+            total = torch.clamp(s2.sum(), min=1e-12)
+            cum = torch.cumsum(s2, dim=0) / total
+            r = int(torch.searchsorted(cum, torch.tensor(energy_ratio, device=cum.device)).item()) + 1
+            r = max(1, min(r, vh.shape[0]))
+
+            basis = vh[:r, :].transpose(0, 1).contiguous()  # [d_model, r]
+            self.old_router_basis = basis.to(self.router.weight.device)
+
+    def _project_to_old_router_orthogonal(self, vec):
+        """Project row vector(s) to orthogonal complement of old router row-space."""
+        if self.old_router_basis is None:
+            return vec
+        b = self.old_router_basis  # [d_model, r]
+        # vec: [..., d_model]
+        return vec - (vec @ b) @ b.transpose(0, 1)
+
+    def _register_new_router_weight_grad_projection_hook(self):
+        """Hard gradient projection for new_router.weight onto orthogonal complement."""
+        if self.new_router is None:
+            return
+
+        def _hook(grad):
+            # grad shape: [1, d_model]
+            if grad is None or self.old_router_basis is None:
+                return grad
+            return self._project_to_old_router_orthogonal(grad)
+
+        self.new_router.weight.register_hook(_hook)
+
     def add_new_expert(self, d_model, dim_feedforward, dropout, activation):
         """Add a new expert and a temporary 1-dim router head for new task."""
         new_expert = self._create_expert(d_model, dim_feedforward, dropout, activation)
         self.experts.append(new_expert)
 
-        # Create temporary new router dimension (trainable only for current task)
-        self.new_router = nn.Linear(d_model, 1)
+        # 1) Build old router basis via SVD (before adding new dimension)
+        self._compute_old_router_basis(energy_ratio=self.router_svd_energy)
+
+        # 2) Create temporary new router dimension (trainable only for current task, no bias)
+        self.new_router = nn.Linear(d_model, 1, bias=False)
         self.new_router = self.new_router.to(self.router.weight.device)
 
+        # 3) Orthogonal initialization in feature space (project random vector to orthogonal complement)
         with torch.no_grad():
-            nn.init.zeros_(self.new_router.weight)
-            self.new_router.bias.fill_(-1.0)
+            nn.init.normal_(self.new_router.weight, mean=0.0, std=1.0)
+            w = self.new_router.weight.data  # [1, d_model]
+            w = self._project_to_old_router_orthogonal(w)
+
+            # normalize + small scale to avoid initial routing collapse
+            norm = torch.clamp(w.norm(p=2, dim=1, keepdim=True), min=1e-12)
+            w = w / norm
+            old_row_norm_mean = torch.clamp(self.router.weight.data.norm(p=2, dim=1).mean(), min=1e-6)
+            scale = 0.05 * old_row_norm_mean
+            self.new_router.weight.copy_(w * scale)
+
+        # 4) Register hard gradient projection hook
+        self._register_new_router_weight_grad_projection_hook()
 
         self.num_experts += 1
         self.current_task += 1
@@ -183,10 +248,12 @@ class MoEFFNLayer(nn.Module):
             trained_router.weight[:-1].copy_(self.router.weight.data)
             trained_router.bias[:-1].copy_(self.router.bias.data)
             trained_router.weight[-1:].copy_(self.new_router.weight.data)
-            trained_router.bias[-1:].copy_(self.new_router.bias.data)
+            # new_router has no bias; initialize merged bias row to 0
+            trained_router.bias[-1:].zero_()
 
         self.router = trained_router
         self.new_router = None
+        self.old_router_basis = None
 
 
 def _get_activation_fn(activation):

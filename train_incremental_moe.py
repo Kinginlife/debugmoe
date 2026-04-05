@@ -357,19 +357,10 @@ class IncrementalMoETrainer(Trainer):
                 #     f.write("  ✓ query_embed unfrozen\n")
 
                 # Unfreeze Prediction Heads
-                        
-                    # ======= 针对 Frame 头 =======
-                if hasattr(predictor, 'class_embed'):
-                    for name, param in predictor.class_embed.named_parameters():
-                        param.requires_grad = True
-                    
-                        if current_task > 0 and P_frame is not None:
-                            if 'weight' in name:
-                                param.register_hook(get_weight_hook(P_frame))
-                                f.write("  ✓ predictor.class_embed.weight SVD hooked!\n")
-                            elif 'bias' in name:
-                                param.register_hook(get_bias_hook(num_old_classes))
-                                f.write("  ✓ predictor.class_embed.bias Mask hooked!\n")
+                # if hasattr(predictor, 'class_embed'):
+                #     for param in predictor.class_embed.parameters():
+                #         param.requires_grad = True
+                #     f.write("  ✓ class_embed unfrozen\n")
                 # if hasattr(predictor, 'mask_embed'):
                 #     for param in predictor.mask_embed.parameters():
                 #         param.requires_grad = True
@@ -424,17 +415,10 @@ class IncrementalMoETrainer(Trainer):
             # ======= 针对 Clip (VITA) 头 =======
             if hasattr(model, 'vita_module'):
                 vita = model.vita_module
-                if hasattr(vita, 'class_embed'):
-                    for name, param in vita.class_embed.named_parameters():
-                        param.requires_grad = True
-                        
-                        if current_task > 0 and P_clip is not None:
-                            if 'weight' in name:
-                                param.register_hook(get_weight_hook(P_clip))
-                                f.write("  ✓ vita_module.class_embed.weight SVD hooked!\n")
-                            elif 'bias' in name:
-                                param.register_hook(get_bias_hook(num_old_classes))
-                                f.write("  ✓ vita_module.class_embed.bias Mask hooked!\n")
+                # if hasattr(vita, 'class_embed'):
+                #     for param in vita.class_embed.parameters():
+                #         param.requires_grad = True
+                #     f.write("  ✓ vita_module.class_embed unfrozen\n")
                 # if hasattr(vita, 'mask_embed'):
                 #     for param in vita.mask_embed.parameters():
                 #         param.requires_grad = True

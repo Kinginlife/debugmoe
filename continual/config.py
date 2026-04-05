@@ -56,6 +56,9 @@ def add_continual_config(cfg):
     cfg.CONT.QUERY_FEAT = False
 
     cfg.CONT.THRESHOLD = 0.5
+    # SVD energy ratio for old-router subspace projection.
+    # Used in MoE new_router.weight orthogonal gradient projection.
+    cfg.CONT.ROUTER_SVD_ENERGY = 0.99
     #################################
 
     cfg.DATASETS.DATASET_NEED_MAP = [False, ]

@@ -251,6 +251,7 @@ class VitaMultiScaleMaskedTransformerDecoder(nn.Module):
         num_experts: int = 1,
         current_task: int = 0,
         base_experts: int = 2,
+        router_svd_energy: float = 0.99,
     ):
         """
         NOTE: this interface is experimental.
@@ -289,6 +290,7 @@ class VitaMultiScaleMaskedTransformerDecoder(nn.Module):
         self.num_experts = num_experts
         self.current_task = current_task
         self.base_experts = base_experts
+        self.router_svd_energy = router_svd_energy
 
         for i in range(self.num_layers):
             self.transformer_self_attention_layers.append(
@@ -320,6 +322,7 @@ class VitaMultiScaleMaskedTransformerDecoder(nn.Module):
                         dropout=0.0,
                         activation="relu",
                         normalize_before=pre_norm,
+                        router_svd_energy=router_svd_energy,
                     )
                 )
             else:
@@ -398,6 +401,7 @@ class VitaMultiScaleMaskedTransformerDecoder(nn.Module):
             ret["num_experts"] = 1
         ret["current_task"] = cfg.CONT.TASK
         ret["base_experts"] = base_experts
+        ret["router_svd_energy"] = cfg.CONT.get("ROUTER_SVD_ENERGY", 0.99)
 
         return ret
 

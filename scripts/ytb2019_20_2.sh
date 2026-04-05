@@ -3,7 +3,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" &> /dev/null && pwd)
 cd "$SCRIPT_DIR/.."
 
 export DETECTRON2_DATASETS=/data1/lsh/VITA_continue/datasets
-export CUDA_VISIBLE_DEVICES=4,5,6,7
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 NGPUS=4
 CFG_FILE="configs/youtubevis_2019/vita_R50_bs8_moe.yaml"
@@ -11,7 +11,11 @@ OUTPUT_BASE="output_base4epiter1000/ytvis_2019_moe"
 #OUTPUT_BASE="output3/ytvis_2019_moe"
 EXP_NAME="VITA_MoE_20_2"
 
-STEP_ARGS="CONT.BASE_CLS 20 CONT.INC_CLS 2 CONT.MODE overlap SEED 42 CONT.SVD_THRESHOLD 0.7"
+# SVD energy ratio for new_router.weight orthogonal projection (can tune from script)
+ROUTER_SVD_ENERGY=0.99
+
+STEP_ARGS="CONT.BASE_CLS 20 CONT.INC_CLS 2 CONT.MODE overlap SEED 42 \
+CONT.ROUTER_SVD_ENERGY ${ROUTER_SVD_ENERGY} "
 
 BASE_QUERIES=100
 ITER_BASE=20000
@@ -65,11 +69,11 @@ PRETRAINED_PATH="${OUT_DIR_0}/model_final.pth"
 
 echo ">>> Training Task 1 with MoE (adding Expert 1, freezing shared components)"
 python train_incremental_moe.py --num-gpus ${NGPUS} \
-    --dist-url tcp://127.0.0.1:50164 \
+    --dist-url tcp://127.0.0.1:30164 \
     --config-file ${CFG_FILE} \
     OUTPUT_DIR ${OUT_DIR_1} \
     CONT.WEIGHTS ${PRETRAINED_PATH} \
-    TEST.EVAL_PERIOD 1000 \
+    TEST.EVAL_PERIOD 500 \
     CONT.TASK 1 \
     SOLVER.MAX_ITER ${ITER_INC} \
     ${COMM_ARGS_INC}
@@ -86,11 +90,11 @@ for t in {2..10}; do
 
     echo ">>> Training Task ${t} with MoE (adding Expert ${t}, freezing shared components)"
     python train_incremental_moe.py --num-gpus ${NGPUS} \
-        --dist-url tcp://127.0.0.1:50164 \
+        --dist-url tcp://127.0.0.1:30164 \
         --config-file ${CFG_FILE} \
         OUTPUT_DIR ${CURR_OUT} \
         CONT.WEIGHTS ${PREV_WEIGHTS} \
-        TEST.EVAL_PERIOD 1000 \
+        TEST.EVAL_PERIOD 500 \
         CONT.TASK ${t} \
         SOLVER.MAX_ITER ${ITER_INC} \
         ${COMM_ARGS_INC}
