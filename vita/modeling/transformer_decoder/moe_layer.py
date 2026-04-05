@@ -35,7 +35,6 @@ class MoEFFNLayer(nn.Module):
         self.current_task = current_task
         self.normalize_before = normalize_before
         self.router_svd_energy = router_svd_energy
-        self.old_router_basis = None
 
         # Base router: historical dimensions (frozen in incremental phase)
         self.router = nn.Linear(d_model, num_experts)
